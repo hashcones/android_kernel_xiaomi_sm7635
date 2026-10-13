@@ -46,7 +46,11 @@
 #define AA_BUG_FMT(X, fmt, args...)					\
 	WARN((X), "AppArmor WARN %s: (" #X "): " fmt, __func__, ##args)
 #else
-#define AA_BUG_FMT(X, fmt, args...) no_printk(fmt, ##args)
+#define AA_BUG_FMT(X, fmt, args...)					\
+	do {								\
+		BUILD_BUG_ON_INVALID(X);				\
+		no_printk(fmt, ##args);					\
+	} while (0)
 #endif
 
 #define AA_ERROR(fmt, args...)						\
@@ -64,6 +68,18 @@ void aa_info_message(const char *str);
 
 /* Security blob offsets */
 extern struct lsm_blob_sizes apparmor_blob_sizes;
+
+enum reftype {
+	REF_NS,
+	REF_PROXY,
+	REF_RAWDATA,
+};
+
+/* common reference count used by data the shows up in aafs */
+struct aa_common_ref {
+	struct kref count;
+	enum reftype reftype;
+};
 
 /**
  * aa_strneq - compare null terminated @str to a non null terminated substring
@@ -226,7 +242,7 @@ void aa_policy_destroy(struct aa_policy *policy);
  */
 #define fn_label_build(L, P, GFP, FN)					\
 ({									\
-	__label__ __cleanup, __done;					\
+	__label__ __do_cleanup, __done;					\
 	struct aa_label *__new_;					\
 									\
 	if ((L)->size > 1) {						\
@@ -244,7 +260,7 @@ void aa_policy_destroy(struct aa_policy *policy);
 			__new_ = (FN);					\
 			AA_BUG(!__new_);				\
 			if (IS_ERR(__new_))				\
-				goto __cleanup;				\
+				goto __do_cleanup;			\
 			__lvec[__j++] = __new_;				\
 		}							\
 		for (__j = __count = 0; __j < (L)->size; __j++)		\
@@ -266,7 +282,7 @@ void aa_policy_destroy(struct aa_policy *policy);
 			vec_cleanup(profile, __pvec, __count);		\
 		} else							\
 			__new_ = NULL;					\
-__cleanup:								\
+__do_cleanup:								\
 		vec_cleanup(label, __lvec, (L)->size);			\
 	} else {							\
 		(P) = labels_profile(L);				\

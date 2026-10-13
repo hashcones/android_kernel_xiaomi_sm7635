@@ -22,6 +22,7 @@
 #include <linux/swap_slots.h>
 #include <linux/huge_mm.h>
 #include <linux/shmem_fs.h>
+#include <trace/hooks/mm.h>
 #include "internal.h"
 #include "swap.h"
 
@@ -80,6 +81,7 @@ void *get_shadow_from_swap_cache(swp_entry_t entry)
 		return page;
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(get_shadow_from_swap_cache);
 
 /*
  * add_to_swap_cache resembles filemap_add_folio on swapper_space,
@@ -416,11 +418,13 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 	struct swap_info_struct *si;
 	struct folio *folio;
 	void *shadow = NULL;
+	size_t count = 0;
 
 	*new_page_allocated = false;
 
 	for (;;) {
 		int err;
+		bool skip = false;
 		/*
 		 * First check the swap cache.  Since this is normally
 		 * called after swap_cache_get_folio() failed, re-calling
@@ -473,6 +477,10 @@ struct page *__read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 		 * __read_swap_cache_async(), which has set SWAP_HAS_CACHE
 		 * in swap_map, but not yet added its page to swap cache.
 		 */
+		trace_android_rvh_read_swap_cache_async_timeout(&count, &skip);
+		if (skip)
+			continue;
+
 		schedule_timeout_uninterruptible(1);
 	}
 
@@ -526,6 +534,8 @@ struct page *read_swap_cache_async(swp_entry_t entry, gfp_t gfp_mask,
 
 	return retpage;
 }
+
+EXPORT_SYMBOL_GPL(read_swap_cache_async);
 
 static unsigned int __swapin_nr_pages(unsigned long prev_offset,
 				      unsigned long offset,

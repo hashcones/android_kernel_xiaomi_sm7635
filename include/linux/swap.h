@@ -395,6 +395,16 @@ void lru_cache_add(struct page *);
 void mark_page_accessed(struct page *);
 void folio_mark_accessed(struct folio *);
 
+static inline bool folio_may_be_lru_cached(struct folio *folio)
+{
+	/*
+	 * Holding PMD-sized folios in per-CPU LRU cache unbalances accounting.
+	 * Holding small numbers of low-order mTHP folios in per-CPU LRU cache
+	 * will be sensible, but nobody has implemented and tested that yet.
+	 */
+	return !folio_test_large(folio);
+}
+
 extern atomic_t lru_disable_count;
 
 static inline bool lru_cache_disabled(void)
@@ -439,6 +449,7 @@ extern int vm_swappiness;
 long remove_mapping(struct address_space *mapping, struct folio *folio);
 
 extern unsigned long reclaim_pages(struct list_head *page_list);
+extern unsigned long __reclaim_pages(struct list_head *page_list, void *private);
 #ifdef CONFIG_NUMA
 extern int node_reclaim_mode;
 extern int sysctl_min_unmapped_ratio;
@@ -571,6 +582,11 @@ static inline void swap_shmem_alloc(swp_entry_t swp)
 }
 
 static inline int swap_duplicate(swp_entry_t swp)
+{
+	return 0;
+}
+
+static inline int swapcache_prepare(swp_entry_t swp)
 {
 	return 0;
 }

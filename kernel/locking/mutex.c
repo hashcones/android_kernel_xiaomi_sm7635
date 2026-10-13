@@ -54,6 +54,7 @@ __mutex_init(struct mutex *lock, const char *name, struct lock_class_key *key)
 #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
 	osq_lock_init(&lock->osq);
 #endif
+	android_init_oem_data(lock, 1);
 
 	trace_android_vh_mutex_init(lock);
 	debug_mutex_init(lock, name, key);
@@ -977,6 +978,8 @@ static noinline void __sched __mutex_unlock_slowpath(struct mutex *lock, unsigne
 	raw_spin_unlock(&lock->wait_lock);
 
 	wake_up_q(&wake_q);
+
+	trace_android_vh_mutex_wakeup_patch(lock);
 }
 
 #ifndef CONFIG_DEBUG_LOCK_ALLOC

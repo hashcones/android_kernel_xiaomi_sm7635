@@ -756,8 +756,10 @@ void blk_mq_debugfs_register_hctxs(struct request_queue *q)
 	struct blk_mq_hw_ctx *hctx;
 	unsigned long i;
 
+	mutex_lock(&q->debugfs_mutex);
 	queue_for_each_hw_ctx(q, hctx, i)
 		blk_mq_debugfs_register_hctx(q, hctx);
+	mutex_unlock(&q->debugfs_mutex);
 }
 
 void blk_mq_debugfs_unregister_hctxs(struct request_queue *q)
@@ -873,4 +875,13 @@ void blk_mq_debugfs_unregister_sched_hctx(struct blk_mq_hw_ctx *hctx)
 		return;
 	debugfs_remove_recursive(hctx->sched_debugfs_dir);
 	hctx->sched_debugfs_dir = NULL;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(blk_sub_page_limit_queues_fops,
+			blk_sub_page_limit_queues_get, NULL, "%llu\n");
+
+void blk_mq_debugfs_init(void)
+{
+	debugfs_create_file("sub_page_limit_queues", 0400, blk_debugfs_root,
+			    NULL, &blk_sub_page_limit_queues_fops);
 }

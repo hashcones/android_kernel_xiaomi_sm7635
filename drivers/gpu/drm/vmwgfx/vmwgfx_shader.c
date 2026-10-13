@@ -177,7 +177,7 @@ static int vmw_gb_shader_init(struct vmw_private *dev_priv,
 
 	res->backup_size = size;
 	if (byte_code) {
-		res->backup = vmw_bo_reference(byte_code);
+		res->backup = vmw_user_bo_ref(byte_code);
 		res->backup_offset = offset;
 	}
 	shader->size = size;
@@ -806,8 +806,7 @@ static int vmw_shader_define(struct drm_device *dev, struct drm_file *file_priv,
 				    shader_type, num_input_sig,
 				    num_output_sig, tfile, shader_handle);
 out_bad_arg:
-	vmw_bo_unreference(&buffer);
-	drm_gem_object_put(&buffer->base.base);
+	vmw_user_bo_unref(&buffer);
 	return ret;
 }
 
@@ -918,8 +917,10 @@ int vmw_compat_shader_add(struct vmw_private *dev_priv,
 	ttm_bo_unreserve(&buf->base);
 
 	res = vmw_shader_alloc(dev_priv, buf, size, 0, shader_type);
-	if (unlikely(ret != 0))
+	if (IS_ERR(res)) {
+		ret = PTR_ERR(res);
 		goto no_reserve;
+	}
 
 	ret = vmw_cmdbuf_res_add(man, vmw_cmdbuf_res_shader,
 				 vmw_shader_key(user_key, shader_type),

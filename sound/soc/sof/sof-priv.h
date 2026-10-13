@@ -17,8 +17,11 @@
 #include <sound/sof/info.h>
 #include <sound/sof/pm.h>
 #include <sound/sof/trace.h>
+#include <sound/compress_params.h>
 #include <uapi/sound/sof/fw.h>
 #include <sound/sof/ext_manifest.h>
+
+struct snd_sof_pcm_stream;
 
 /* Flag definitions used in sof_core_debug (sof_debug module parameter) */
 #define SOF_DBG_ENABLE_TRACE	BIT(0)
@@ -110,6 +113,8 @@ struct sof_compr_stream {
 	u32 sampling_rate;
 	u16 channels;
 	u16 sample_container_bytes;
+	struct snd_codec codec_params;
+	size_t posn_offset;
 };
 
 struct snd_sof_dev;
@@ -134,6 +139,17 @@ struct snd_sof_platform_stream_params {
 	u32 phy_addr;
 	bool no_ipc_position;
 	bool cont_update_posn;
+};
+
+/**
+ * struct sof_firmware - Container struct for SOF firmware
+ * @fw:			Pointer to the firmware
+ * @payload_offset:	Offset of the data within the loaded firmware image to be
+ *			loaded to the DSP (skipping for example ext_manifest section)
+ */
+struct sof_firmware {
+	const struct firmware *fw;
+	u32 payload_offset;
 };
 
 /*
@@ -229,12 +245,12 @@ struct snd_sof_dsp_ops {
 
 	/* host read DSP stream data */
 	int (*ipc_msg_data)(struct snd_sof_dev *sdev,
-			    struct snd_pcm_substream *substream,
+			    struct snd_sof_pcm_stream *sps,
 			    void *p, size_t sz); /* mandatory */
 
 	/* host side configuration of the stream's data offset in stream mailbox area */
 	int (*set_stream_data_offset)(struct snd_sof_dev *sdev,
-				      struct snd_pcm_substream *substream,
+				      struct snd_sof_pcm_stream *sps,
 				      size_t posn_offset); /* optional */
 
 	/* pre/post firmware run */
@@ -487,6 +503,9 @@ struct snd_sof_dev {
 	spinlock_t ipc_lock;	/* lock for IPC users */
 	spinlock_t hw_lock;	/* lock for HW IO access */
 
+	/* Main, Base firmware image */
+	struct sof_firmware basefw;
+
 	/*
 	 * ASoC components. plat_drv fields are set dynamically so
 	 * can't use const
@@ -729,10 +748,10 @@ int sof_block_read(struct snd_sof_dev *sdev, enum snd_sof_fw_blk_type blk_type,
 		   u32 offset, void *dest, size_t size);
 
 int sof_ipc_msg_data(struct snd_sof_dev *sdev,
-		     struct snd_pcm_substream *substream,
+		     struct snd_sof_pcm_stream *sps,
 		     void *p, size_t sz);
 int sof_set_stream_data_offset(struct snd_sof_dev *sdev,
-			       struct snd_pcm_substream *substream,
+			       struct snd_sof_pcm_stream *sps,
 			       size_t posn_offset);
 
 int sof_stream_pcm_open(struct snd_sof_dev *sdev,

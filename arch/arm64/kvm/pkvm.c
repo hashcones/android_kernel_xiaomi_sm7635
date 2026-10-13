@@ -4,6 +4,8 @@
  * Author: Quentin Perret <qperret@google.com>
  */
 
+#include <linux/init.h>
+#include <linux/initrd.h>
 #include <linux/io.h>
 #include <linux/kmemleak.h>
 #include <linux/kvm_host.h>
@@ -60,12 +62,34 @@ static void __init sort_memblock_regions(void)
 static int __init register_memblock_regions(void)
 {
 	struct memblock_region *reg;
+	bool pvmfw_in_mem = false;
 
 	for_each_mem_region(reg) {
 		if (*hyp_memblock_nr_ptr >= HYP_MEMBLOCK_REGIONS)
 			return -ENOMEM;
 
 		hyp_memory[*hyp_memblock_nr_ptr] = *reg;
+		(*hyp_memblock_nr_ptr)++;
+
+		if (!*pvmfw_size || pvmfw_in_mem ||
+			!memblock_addrs_overlap(reg->base, reg->size, *pvmfw_base, *pvmfw_size))
+			continue;
+		/* If the pvmfw region overlaps a memblock, it must be a subset */
+		if (*pvmfw_base < reg->base ||
+				(*pvmfw_base + *pvmfw_size) > (reg->base + reg->size))
+			return -EINVAL;
+		pvmfw_in_mem = true;
+	}
+
+	if (*pvmfw_size && !pvmfw_in_mem) {
+		if (*hyp_memblock_nr_ptr >= HYP_MEMBLOCK_REGIONS)
+			return -ENOMEM;
+
+		hyp_memory[*hyp_memblock_nr_ptr] = (struct memblock_region) {
+			.base   = *pvmfw_base,
+			.size   = *pvmfw_size,
+			.flags  = MEMBLOCK_NOMAP,
+		};
 		(*hyp_memblock_nr_ptr)++;
 	}
 	sort_memblock_regions();
@@ -146,6 +170,12 @@ static int __init register_moveable_regions(void)
 
 	return 0;
 }
+
+static int __init early_hyp_lm_size_mb_cfg(char *arg)
+{
+	return kstrtoull(arg, 10, &kvm_nvhe_sym(hyp_lm_size_mb));
+}
+early_param("kvm-arm.hyp_lm_size_mb", early_hyp_lm_size_mb_cfg);
 
 void __init kvm_hyp_reserve(void)
 {
@@ -260,6 +290,8 @@ static int __pkvm_create_hyp_vm(struct kvm *host_kvm)
 	host_kvm->arch.pkvm.handle = handle;
 
 	total_sz = hyp_vm_sz + last_ran_sz + pgd_sz;
+	atomic64_set(&host_kvm->stat.protected_hyp_mem, total_sz);
+	kvm_account_pgtable_pages(pgd, pgd_sz >> PAGE_SHIFT);
 
 	/* Donate memory for the vcpus at hyp and initialize it. */
 	hyp_vcpu_sz = PAGE_ALIGN(PKVM_HYP_VCPU_SIZE);
@@ -278,18 +310,15 @@ static int __pkvm_create_hyp_vm(struct kvm *host_kvm)
 			goto destroy_vm;
 		}
 
-		total_sz += hyp_vcpu_sz;
-
 		ret = kvm_call_hyp_nvhe(__pkvm_init_vcpu, handle, host_vcpu,
 					hyp_vcpu);
 		if (ret) {
 			free_pages_exact(hyp_vcpu, hyp_vcpu_sz);
 			goto destroy_vm;
 		}
-	}
 
-	atomic64_set(&host_kvm->stat.protected_hyp_mem, total_sz);
-	kvm_account_pgtable_pages(pgd, pgd_sz >> PAGE_SHIFT);
+		atomic64_add(hyp_vcpu_sz, &host_kvm->stat.protected_hyp_mem);
+	}
 
 	return 0;
 
@@ -320,7 +349,7 @@ int pkvm_create_hyp_vm(struct kvm *host_kvm)
 void pkvm_destroy_hyp_vm(struct kvm *host_kvm)
 {
 	struct kvm_pinned_page *ppage;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = host_kvm->mm;
 	struct rb_node *node;
 
 	if (!host_kvm->arch.pkvm.handle)
@@ -379,7 +408,7 @@ static int rb_ppage_cmp(const void *key, const struct rb_node *node)
 void pkvm_host_reclaim_page(struct kvm *host_kvm, phys_addr_t ipa)
 {
 	struct kvm_pinned_page *ppage;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = host_kvm->mm;
 	struct rb_node *node;
 
 	write_lock(&host_kvm->mmu_lock);
@@ -495,7 +524,7 @@ static int __init finalize_pkvm(void)
 {
 	int ret;
 
-	if (!is_protected_kvm_enabled()) {
+	if (!is_protected_kvm_enabled() || !is_kvm_arm_initialised()) {
 		pkvm_firmware_rmem_clear();
 		return 0;
 	}
@@ -627,6 +656,7 @@ static int __init __pkvm_request_early_module(char *module_name,
 		"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
 		NULL
 	};
+	static bool proc;
 	char **argv;
 	int idx = 0;
 
@@ -658,6 +688,15 @@ static int __init __pkvm_request_early_module(char *module_name,
 	/* Even with CONFIG_STATIC_USERMODEHELPER we really want this path */
 	info->path = modprobe_path;
 
+	if (!proc) {
+		wait_for_initramfs();
+		if (init_mount("proc", "/proc", "proc",
+			       MS_SILENT | MS_NOEXEC | MS_NOSUID, NULL))
+			pr_warn("Couldn't mount /proc, pKVM module parameters will be ignored\n");
+
+		proc = true;
+	}
+
 	return call_usermodehelper_exec(info, UMH_WAIT_PROC | UMH_KILLABLE);
 err:
 	kfree(argv);
@@ -686,11 +725,7 @@ int __init pkvm_load_early_modules(void)
 {
 	char *token, *buf = early_pkvm_modules;
 	char *module_path = CONFIG_PKVM_MODULE_PATH;
-	int err = init_mount("proc", "/proc", "proc",
-			     MS_SILENT | MS_NOEXEC | MS_NOSUID, NULL);
-
-	if (err)
-		return err;
+	int err;
 
 	while (true) {
 		token = strsep(&buf, ",");

@@ -551,13 +551,24 @@ static u64 update_triggers(struct psi_group *group, u64 now)
 		if (now < t->last_event_time + t->win.size)
 			continue;
 
+		trace_android_vh_psi_event(t);
+
 		/* Generate an event */
-		if (cmpxchg(&t->event, 0, 1) == 0)
-			wake_up_interruptible(&t->event_wait);
+		if (cmpxchg(&t->event, 0, 1) == 0) {
+			struct psi_trigger_ext *t_ext;
+
+			t_ext = container_of(t, struct psi_trigger_ext, trigger);
+			if (t_ext->of)
+				kernfs_notify(t_ext->of->kn);
+			else
+				wake_up_interruptible(&t->event_wait);
+		}
 		t->last_event_time = now;
 		/* Reset threshold breach flag once event got generated */
 		t->pending_event = false;
 	}
+
+	trace_android_vh_psi_group(group);
 
 	if (update_total)
 		memcpy(group->polling_total, total,
@@ -729,14 +740,16 @@ static void record_times(struct psi_group_cpu *groupc, u64 now)
 }
 
 static void psi_group_change(struct psi_group *group, int cpu,
-			     unsigned int clear, unsigned int set, u64 now,
+			     unsigned int clear, unsigned int set,
 			     bool wake_clock)
 {
 	struct psi_group_cpu *groupc;
 	unsigned int t, m;
 	enum psi_states s;
 	u32 state_mask;
+	u64 now;
 
+	lockdep_assert_rq_held(cpu_rq(cpu));
 	groupc = per_cpu_ptr(group->pcpu, cpu);
 
 	/*
@@ -749,6 +762,7 @@ static void psi_group_change(struct psi_group *group, int cpu,
 	 * SOME and FULL time these may have resulted in.
 	 */
 	write_seqcount_begin(&groupc->seq);
+	now = cpu_clock(cpu);
 
 	/*
 	 * Start with TSK_ONCPU, which doesn't have a corresponding
@@ -862,18 +876,15 @@ void psi_task_change(struct task_struct *task, int clear, int set)
 {
 	int cpu = task_cpu(task);
 	struct psi_group *group;
-	u64 now;
 
 	if (!task->pid)
 		return;
 
 	psi_flags_change(task, clear, set);
 
-	now = cpu_clock(cpu);
-
 	group = task_psi_group(task);
 	do {
-		psi_group_change(group, cpu, clear, set, now, true);
+		psi_group_change(group, cpu, clear, set, true);
 	} while ((group = group->parent));
 }
 
@@ -882,7 +893,6 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 {
 	struct psi_group *group, *common = NULL;
 	int cpu = task_cpu(prev);
-	u64 now = cpu_clock(cpu);
 
 	if (next->pid) {
 		psi_flags_change(next, 0, TSK_ONCPU);
@@ -899,7 +909,7 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 				break;
 			}
 
-			psi_group_change(group, cpu, 0, TSK_ONCPU, now, true);
+			psi_group_change(group, cpu, 0, TSK_ONCPU, true);
 		} while ((group = group->parent));
 	}
 
@@ -937,7 +947,7 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 		do {
 			if (group == common)
 				break;
-			psi_group_change(group, cpu, clear, set, now, wake_clock);
+			psi_group_change(group, cpu, clear, set, wake_clock);
 		} while ((group = group->parent));
 
 		/*
@@ -949,32 +959,47 @@ void psi_task_switch(struct task_struct *prev, struct task_struct *next,
 		if ((prev->psi_flags ^ next->psi_flags) & ~TSK_ONCPU) {
 			clear &= ~TSK_ONCPU;
 			for (; group; group = group->parent)
-				psi_group_change(group, cpu, clear, set, now, wake_clock);
+				psi_group_change(group, cpu, clear, set, wake_clock);
 		}
 	}
 }
 
 #ifdef CONFIG_IRQ_TIME_ACCOUNTING
-void psi_account_irqtime(struct task_struct *task, u32 delta)
+static DEFINE_PER_CPU(u64, psi_irq_time);
+void psi_account_irqtime(struct rq *rq, struct task_struct *curr, struct task_struct *prev)
 {
-	int cpu = task_cpu(task);
+	int cpu = task_cpu(curr);
 	struct psi_group *group;
 	struct psi_group_cpu *groupc;
-	u64 now;
+	u64 *psi_time;
+	s64 delta;
+	u64 irq;
 
-	if (!task->pid)
+	if (!curr->pid)
 		return;
 
-	now = cpu_clock(cpu);
+	lockdep_assert_rq_held(rq);
+	group = task_psi_group(curr);
+	if (prev && task_psi_group(prev) == group)
+		return;
 
-	group = task_psi_group(task);
+	irq = irq_time_read(cpu);
+	psi_time =  &per_cpu(psi_irq_time, cpu);
+	delta = (s64)(irq - *psi_time);
+	if (delta < 0)
+		return;
+	*psi_time = irq;
+
 	do {
+		u64 now;
+
 		if (!group->enabled)
 			continue;
 
 		groupc = per_cpu_ptr(group->pcpu, cpu);
 
 		write_seqcount_begin(&groupc->seq);
+		now = cpu_clock(cpu);
 
 		record_times(groupc, now);
 		groupc->times[PSI_IRQ_FULL] += delta;
@@ -1173,11 +1198,9 @@ void psi_cgroup_restart(struct psi_group *group)
 	for_each_possible_cpu(cpu) {
 		struct rq *rq = cpu_rq(cpu);
 		struct rq_flags rf;
-		u64 now;
 
 		rq_lock_irq(rq, &rf);
-		now = cpu_clock(cpu);
-		psi_group_change(group, cpu, 0, 0, now, true);
+		psi_group_change(group, cpu, 0, 0, true);
 		rq_unlock_irq(rq, &rf);
 	}
 }
@@ -1228,9 +1251,11 @@ int psi_show(struct seq_file *m, struct psi_group *group, enum psi_res res)
 	return 0;
 }
 
-struct psi_trigger *psi_trigger_create(struct psi_group *group,
-			char *buf, enum psi_res res)
+struct psi_trigger *psi_trigger_create(struct psi_group *group, char *buf,
+				       enum psi_res res, struct file *file,
+				       struct kernfs_open_file *of)
 {
+	struct psi_trigger_ext *t_ext;
 	struct psi_trigger *t;
 	enum psi_states state;
 	u32 threshold_us;
@@ -1261,9 +1286,10 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 	if (threshold_us == 0 || threshold_us > window_us)
 		return ERR_PTR(-EINVAL);
 
-	t = kmalloc(sizeof(*t), GFP_KERNEL);
-	if (!t)
+	t_ext = kmalloc(sizeof(*t_ext), GFP_KERNEL);
+	if (!t_ext)
 		return ERR_PTR(-ENOMEM);
+	t = &t_ext->trigger;
 
 	t->group = group;
 	t->state = state;
@@ -1274,7 +1300,9 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 
 	t->event = 0;
 	t->last_event_time = 0;
-	init_waitqueue_head(&t->event_wait);
+	t_ext->of = of;
+	if (!of)
+		init_waitqueue_head(&t->event_wait);
 	t->pending_event = false;
 
 	mutex_lock(&group->trigger_lock);
@@ -1284,7 +1312,7 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 
 		task = kthread_create(psi_poll_worker, group, "psimon");
 		if (IS_ERR(task)) {
-			kfree(t);
+			kfree(t_ext);
 			mutex_unlock(&group->trigger_lock);
 			return ERR_CAST(task);
 		}
@@ -1306,6 +1334,7 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
 
 void psi_trigger_destroy(struct psi_trigger *t)
 {
+	struct psi_trigger_ext *t_ext;
 	struct psi_group *group;
 	struct task_struct *task_to_destroy = NULL;
 
@@ -1322,7 +1351,11 @@ void psi_trigger_destroy(struct psi_trigger *t)
 	 * being accessed later. Can happen if cgroup is deleted from under a
 	 * polling process.
 	 */
-	wake_up_pollfree(&t->event_wait);
+	t_ext = container_of(t, struct psi_trigger_ext, trigger);
+	if (t_ext->of)
+		kernfs_notify(t_ext->of->kn);
+	else
+		wake_up_interruptible(&t->event_wait);
 
 	mutex_lock(&group->trigger_lock);
 
@@ -1370,13 +1403,14 @@ void psi_trigger_destroy(struct psi_trigger *t)
 		kthread_stop(task_to_destroy);
 		atomic_set(&group->poll_scheduled, 0);
 	}
-	kfree(t);
+	kfree(t_ext);
 }
 
 __poll_t psi_trigger_poll(void **trigger_ptr,
 				struct file *file, poll_table *wait)
 {
 	__poll_t ret = DEFAULT_POLLMASK;
+	struct psi_trigger_ext *t_ext;
 	struct psi_trigger *t;
 
 	if (static_branch_likely(&psi_disabled))
@@ -1386,7 +1420,11 @@ __poll_t psi_trigger_poll(void **trigger_ptr,
 	if (!t)
 		return DEFAULT_POLLMASK | EPOLLERR | EPOLLPRI;
 
-	poll_wait(file, &t->event_wait, wait);
+	t_ext = container_of(t, struct psi_trigger_ext, trigger);
+	if (t_ext->of)
+		kernfs_generic_poll(t_ext->of, wait);
+	else
+		poll_wait(file, &t->event_wait, wait);
 
 	if (cmpxchg(&t->event, 1, 0) == 1)
 		ret |= EPOLLPRI;
@@ -1456,7 +1494,7 @@ static ssize_t psi_write(struct file *file, const char __user *user_buf,
 		return -EBUSY;
 	}
 
-	new = psi_trigger_create(&psi_system, buf, res);
+	new = psi_trigger_create(&psi_system, buf, res, file, NULL);
 	if (IS_ERR(new)) {
 		mutex_unlock(&seq->lock);
 		return PTR_ERR(new);

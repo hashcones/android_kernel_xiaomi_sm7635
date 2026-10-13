@@ -434,7 +434,7 @@ struct parisc_device * __init create_tree_node(char id, struct device *parent)
 	dev->dev.dma_mask = &dev->dma_mask;
 	dev->dev.coherent_dma_mask = dev->dma_mask;
 	if (device_register(&dev->dev)) {
-		kfree(dev);
+		put_device(&dev->dev);
 		return NULL;
 	}
 
@@ -1002,6 +1002,9 @@ static __init int qemu_print_iodc_data(struct device *lin_dev, void *data)
 	}
 
 	pr_info("\n");
+
+	/* Prevent hung task messages when printing on serial console */
+	cond_resched();
 
 	pr_info("#define HPA_%08lx_DESCRIPTION \"%s\"\n",
 		hpa, parisc_hardware_description(&dev->id));

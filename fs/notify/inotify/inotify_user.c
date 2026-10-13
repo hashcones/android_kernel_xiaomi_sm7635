@@ -622,6 +622,7 @@ static int inotify_new_watch(struct fsnotify_group *group,
 	if (ret) {
 		/* we failed to get on the inode, get off the idr */
 		inotify_remove_from_idr(group, tmp_i_mark);
+		dec_inotify_watches(group->inotify_data.ucounts);
 		goto out_err;
 	}
 
@@ -786,11 +787,13 @@ SYSCALL_DEFINE3(inotify_add_watch, int, fd, const char __user *, pathname,
 		if (path.dentry->d_op->d_canonical_path) {
 			ret = path.dentry->d_op->d_canonical_path(&path,
 							    &alteredpath);
-			if (ret)
-				goto path_put_and_out;
-
-			canonical_path = &alteredpath;
-			path_put(&path);
+			if (ret != -ENOSYS) {
+				if (ret) {
+					goto path_put_and_out;
+				}
+				canonical_path = &alteredpath;
+				path_put(&path);
+			}
 		}
 	}
 

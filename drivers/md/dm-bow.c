@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2018 Google Limited.
  *
@@ -88,6 +87,7 @@ struct bow_context {
 	struct mutex ranges_lock; /* Hold to access this struct and/or ranges */
 	struct rb_root ranges;
 	struct dm_kobject_holder kobj_holder;	/* for sysfs attributes */
+	struct mutex state_lock;
 	atomic_t state; /* One of the enum state values above */
 	u64 trims_total;
 	struct log_sector *log_sector;
@@ -527,6 +527,12 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 		return -EINVAL;
 	}
 
+	/* Block new writes until state change is complete. */
+	mutex_lock(&bc->state_lock);
+
+	/* Flush any already-queued writes before the state change. */
+	flush_workqueue(bc->workqueue);
+
 	mutex_lock(&bc->ranges_lock);
 	original_state = atomic_read(&bc->state);
 	if (state != original_state + 1) {
@@ -562,6 +568,8 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 bad:
 	mutex_unlock(&bc->ranges_lock);
+	mutex_unlock(&bc->state_lock);
+
 	return ret;
 }
 
@@ -587,7 +595,6 @@ static struct attribute *bow_attrs[] = {
 	&attr_free.attr,
 	NULL
 };
-
 ATTRIBUTE_GROUPS(bow);
 
 static struct kobj_type bow_ktype = {
@@ -603,16 +610,16 @@ static void dm_bow_dtr(struct dm_target *ti)
 	struct bow_context *bc = (struct bow_context *) ti->private;
 	struct kobject *kobj;
 
-	if (bc->workqueue)
-		destroy_workqueue(bc->workqueue);
-	if (bc->bufio)
-		dm_bufio_client_destroy(bc->bufio);
-
 	kobj = &bc->kobj_holder.kobj;
 	if (kobj->state_initialized) {
 		kobject_put(kobj);
 		wait_for_completion(dm_get_completion_from_kobject(kobj));
 	}
+
+	if (bc->workqueue)
+		destroy_workqueue(bc->workqueue);
+	if (bc->bufio)
+		dm_bufio_client_destroy(bc->bufio);
 
 	mutex_lock(&bc->ranges_lock);
 	while (rb_first(&bc->ranges)) {
@@ -713,7 +720,6 @@ static int dm_bow_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ti->num_flush_bios = 1;
 	ti->num_discard_bios = 1;
-	ti->num_write_zeroes_bios = 1;
 	ti->private = bc;
 
 	ret = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table),
@@ -739,6 +745,7 @@ static int dm_bow_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	init_completion(&bc->kobj_holder.completion);
+	mutex_init(&bc->state_lock);
 	mutex_init(&bc->ranges_lock);
 	bc->ranges = RB_ROOT;
 	bc->bufio = dm_bufio_client_create(bc->dev->bdev, bc->block_size, 1, 0,
@@ -833,7 +840,7 @@ static int prepare_unchanged_range(struct bow_context *bc, struct bow_range *br,
 
 	/* Carve out a backup range. This may be smaller than the br given */
 	backup_bi.bi_sector = backup_br->sector;
-	backup_bi.bi_size = min_t(u64, range_size(backup_br), bi_iter->bi_size);
+	backup_bi.bi_size = min(range_size(backup_br), (u64) bi_iter->bi_size);
 	ret = split_range(bc, &backup_br, &backup_bi);
 	if (ret)
 		return ret;
@@ -1003,10 +1010,10 @@ static int handle_sector0(struct bow_context *bc, struct bio *bio)
 	int ret = DM_MAPIO_REMAPPED;
 
 	if (bio->bi_iter.bi_size > bc->block_size) {
-		struct bio *split = bio_split(bio,
-					      bc->block_size >> SECTOR_SHIFT,
-					      GFP_NOIO,
-					      &fs_bio_set);
+		struct bio * split = bio_split(bio,
+					       bc->block_size >> SECTOR_SHIFT,
+					       GFP_NOIO,
+					       &fs_bio_set);
 		if (!split) {
 			DMERR("Failed to split bio");
 			bio->bi_status = BLK_STS_RESOURCE;
@@ -1033,8 +1040,7 @@ static int add_trim(struct bow_context *bc, struct bio *bio)
 	struct bow_range *br;
 	struct bvec_iter bi_iter = bio->bi_iter;
 
-	DMDEBUG("%s: %llu, %u",
-		__func__,
+	DMDEBUG("add_trim: %llu, %u",
 		(unsigned long long)bio->bi_iter.bi_sector,
 		bio->bi_iter.bi_size);
 
@@ -1073,8 +1079,7 @@ static int remove_trim(struct bow_context *bc, struct bio *bio)
 	struct bow_range *br;
 	struct bvec_iter bi_iter = bio->bi_iter;
 
-	DMDEBUG("%s: %llu, %u",
-		__func__,
+	DMDEBUG("remove_trim: %llu, %u",
 		(unsigned long long)bio->bi_iter.bi_sector,
 		bio->bi_iter.bi_size);
 
@@ -1115,8 +1120,8 @@ int remap_unless_illegal_trim(struct bow_context *bc, struct bio *bio)
 		return DM_MAPIO_SUBMITTED;
 	} else {
 		bio_set_dev(bio, bc->dev->bdev);
+		return DM_MAPIO_REMAPPED;
 	}
-	return DM_MAPIO_REMAPPED;
 }
 
 /****** dm interface ******/
@@ -1126,11 +1131,23 @@ static int dm_bow_map(struct dm_target *ti, struct bio *bio)
 	int ret = DM_MAPIO_REMAPPED;
 	struct bow_context *bc = ti->private;
 
+	/* Fast path when already committed or when performing a read. */
+
 	if (likely(bc->state.counter == COMMITTED))
 		return remap_unless_illegal_trim(bc, bio);
 
 	if (bio_data_dir(bio) == READ && bio->bi_iter.bi_sector != 0)
 		return remap_unless_illegal_trim(bc, bio);
+
+	if (bio->bi_iter.bi_size == 0)
+		return remap_unless_illegal_trim(bc, bio);
+
+	/*
+	 * Fall back to the slower path when we may be in TRIM/CHECKPOINT.
+	 * Operations must wait for any pending state changes to complete.
+	 */
+
+	mutex_lock(&bc->state_lock);
 
 	if (atomic_read(&bc->state) != COMMITTED) {
 		enum state state;
@@ -1142,16 +1159,28 @@ static int dm_bow_map(struct dm_target *ti, struct bio *bio)
 				ret = add_trim(bc, bio);
 			else if (bio_data_dir(bio) == WRITE)
 				ret = remove_trim(bc, bio);
+			/* else pass-through */
 		} else if (state == CHECKPOINT) {
 			if (bio->bi_iter.bi_sector == 0)
 				ret = handle_sector0(bc, bio);
-			else if (bio_data_dir(bio) == WRITE)
+			else if (bio_op(bio) == REQ_OP_DISCARD) {
+				/*
+				 * Ignore discard requests in CHECKPOINT state.
+				 * Passing them through would physically erase data that we
+				 * are trying to protect, creating a state mismatch.
+				 * We complete the bio with success and stop processing.
+				 */
+				bio_endio(bio);
+				ret = DM_MAPIO_SUBMITTED;
+			} else if (bio_data_dir(bio) == WRITE)
 				ret = queue_write(bc, bio);
-		} else {
-			/* pass-through */
+			/* else pass-through */
 		}
+		/* else pass-through */
 		mutex_unlock(&bc->ranges_lock);
 	}
+
+	mutex_unlock(&bc->state_lock);
 
 	if (ret == DM_MAPIO_REMAPPED)
 		return remap_unless_illegal_trim(bc, bio);
@@ -1270,7 +1299,7 @@ int dm_bow_prepare_ioctl(struct dm_target *ti, struct block_device **bdev)
 
 	*bdev = dev->bdev;
 	/* Only pass ioctls through if the device sizes match exactly. */
-	return ti->len != i_size_read(dev->bdev->bd_inode) >> SECTOR_SHIFT;
+	return ti->len != bdev_nr_sectors(dev->bdev);
 }
 
 static int dm_bow_iterate_devices(struct dm_target *ti,

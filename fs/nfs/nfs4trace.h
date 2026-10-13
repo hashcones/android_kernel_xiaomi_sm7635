@@ -9,10 +9,10 @@
 #define _TRACE_NFS4_H
 
 #include <linux/tracepoint.h>
-#include <trace/events/sunrpc_base.h>
+#include <trace/misc/sunrpc.h>
 
-#include <trace/events/fs.h>
-#include <trace/events/nfs.h>
+#include <trace/misc/fs.h>
+#include <trace/misc/nfs.h>
 
 #define show_nfs_fattr_flags(valid) \
 	__print_flags((unsigned long)valid, "|", \
@@ -1248,6 +1248,7 @@ DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_setattr);
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_delegreturn);
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_open_stateid_update);
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_open_stateid_update_wait);
+DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_open_stateid_update_skip);
 DEFINE_NFS4_INODE_STATEID_EVENT(nfs4_close_stateid_update_wait);
 
 DECLARE_EVENT_CLASS(nfs4_getattr_event,

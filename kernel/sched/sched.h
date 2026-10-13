@@ -71,7 +71,6 @@
 #include <linux/workqueue_api.h>
 #include <linux/android_vendor.h>
 #include <linux/android_kabi.h>
-#include "android.h"
 
 #include <trace/events/power.h>
 #include <trace/events/sched.h>
@@ -2414,7 +2413,7 @@ extern void init_dl_inactive_task_timer(struct sched_dl_entity *dl_se);
 #define RATIO_SHIFT		8
 #define MAX_BW_BITS		(64 - BW_SHIFT)
 #define MAX_BW			((1ULL << MAX_BW_BITS) - 1)
-unsigned long to_ratio(u64 period, u64 runtime);
+u64 to_ratio(u64 period, u64 runtime);
 
 extern void init_entity_runnable_average(struct sched_entity *se);
 extern void post_init_entity_util_avg(struct task_struct *p);
@@ -3279,4 +3278,5 @@ static inline void update_current_exec_runtime(struct task_struct *curr,
 	cgroup_account_cputime(curr, delta_exec);
 }
 
+extern bool cpu_busy_with_softirqs(int cpu);
 #endif /* _KERNEL_SCHED_SCHED_H */

@@ -735,11 +735,11 @@ int lirc_register(struct rc_dev *dev)
 
 	cdev_init(&dev->lirc_cdev, &lirc_fops);
 
+	get_device(&dev->dev);
+
 	err = cdev_device_add(&dev->lirc_cdev, &dev->lirc_dev);
 	if (err)
-		goto out_ida;
-
-	get_device(&dev->dev);
+		goto out_put_device;
 
 	switch (dev->driver_type) {
 	case RC_DRIVER_SCANCODE:
@@ -763,7 +763,8 @@ int lirc_register(struct rc_dev *dev)
 
 	return 0;
 
-out_ida:
+out_put_device:
+	put_device(&dev->lirc_dev);
 	ida_free(&lirc_ida, minor);
 	return err;
 }
@@ -814,7 +815,7 @@ void __exit lirc_dev_exit(void)
 	unregister_chrdev_region(lirc_base_dev, RC_DEV_MAX);
 }
 
-struct rc_dev *rc_dev_get_from_fd(int fd)
+struct rc_dev *rc_dev_get_from_fd(int fd, bool write)
 {
 	struct fd f = fdget(fd);
 	struct lirc_fh *fh;
@@ -826,6 +827,11 @@ struct rc_dev *rc_dev_get_from_fd(int fd)
 	if (f.file->f_op != &lirc_fops) {
 		fdput(f);
 		return ERR_PTR(-EINVAL);
+	}
+
+	if (write && !(f.file->f_mode & FMODE_WRITE)) {
+		fdput(f);
+		return ERR_PTR(-EPERM);
 	}
 
 	fh = f.file->private_data;
