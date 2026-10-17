@@ -1,88 +1,106 @@
-name: Build Kernel
+name: Build kernel with NetHunter Builder
+
 on:
- workflow_dispatch:
- push:
-  branches:
-  - lineage-24.0
+  workflow_dispatch:
+  push:
+    branches:
+      - lineage-24.0
 
 jobs:
- build:
-  runs-on: ubuntu-latest
-  steps:
-  - name: Checkout kernel source
-    uses: actions/checkout@v4
-    with:
-      fetch-depth: 1
+  build:
+    runs-on: ubuntu-latest
 
-  - name: Install build dependencies
-    run: |
-      sudo apt-get update
-      sudo apt-get install -y --no-install-recommends build-essential bc bison flex libssl-dev curl git python3 python3-pip gcc-aarch64-linux-gnu g++-aarch64-linux-gnu clang lld llvm ccache unzip wget
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-  - name: Set kernel build env
-    run: |
-      echo "ARCH=arm64" >> $GITHUB_ENV
-      echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-      echo "CC=clang" >> $GITHUB_ENV
-      echo "LLVM=1" >> $GITHUB_ENV
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential bc bison flex libssl-dev curl git python3 python3-pip gcc-aarch64-linux-gnu g++-aarch64-linux-gnu clang lld llvm ccache unzip wget expect
 
-  - name: Detect defconfig
-    id: defconfig
-    run: |
-      set -e
-      DEF=$(find arch -type f \( -iname '*flourite*defconfig' -o -iname '*msm*defconfig' \) | head -n 1 || true)
-      if [ -n "$DEF" ]; then
-        echo "DEFCONFIG=${DEF##*/}" >> $GITHUB_ENV
-        echo "Found defconfig: ${DEF##*/}"
-      else
-        echo "DEFCONFIG=msm_defconfig" >> $GITHUB_ENV
-      fi
+      - name: Set kernel build env
+        run: |
+          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "LLVM=1" >> $GITHUB_ENV
 
-  - name: Clone NetHunter kernel builder (Kali)
-    run: |
-      set -e
-      git clone --depth 1 --branch 2026.2 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder.git kali-nethunter-kernel-builder
-      ls -la kali-nethunter-kernel-builder || true
+      - name: Detect defconfig
+        id: defconfig
+        run: |
+          set -e
+          DEF=$(find arch -type f \( -iname '*flourite*defconfig' -o -iname '*msm*defconfig' \) | head -n 1 || true)
+          if [ -n "$DEF" ]; then
+            echo "DEFCONFIG=${DEF##*/}" >> $GITHUB_ENV
+            echo "Found defconfig: ${DEF##*/}"
+          else
+            echo "DEFCONFIG=msm_defconfig" >> $GITHUB_ENV
+          fi
 
-  - name: Run NetHunter builder (if available)
-    env:
-     KERNEL_SRC: ${{ github.workspace }}
-     DEFCONFIG: ${{ env.DEFCONFIG }}
-     TERM: xterm
-     DEBIAN_FRONTEND: noninteractive
-    run: |
-     set -ex
-     export TERM=${TERM:-xterm}
-     KD=./kali-nethunter-kernel-builder
-     OUTDIR=${GITHUB_WORKSPACE}/out-artifacts
-     mkdir -p "$OUTDIR"
-     export ARCH=arm64
-     export CROSS_COMPILE=aarch64-linux-gnu-
-     export CC=clang
-     export LLVM=1
-     if [ -f "$KD/build.sh" ]; then
-       bash "$KD/build.sh" "$KERNEL_SRC" "$OUTDIR"
-     elif [ -f "$KD/build-kernel.sh" ]; then
-       bash "$KD/build-kernel.sh" "$KERNEL_SRC" "$OUTDIR"
-     elif [ -f "$KD/kali-nethunter-kernel-builder.sh" ]; then
-      bash "$KD/kali-nethunter-kernel-builder.sh" "$KERNEL_SRC" "$OUTDIR"
-     else
-      make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- "${DEFCONFIG}"
-      make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
-      mkdir -p "$OUTDIR"
-      cp -v out/arch/arm64/boot/Image* "$OUTDIR/" || true
-      cp -v out/arch/arm64/boot/dts/*/*.dtb "$OUTDIR/" || true
-      cp -v out/arch/arm64/boot/dts/qcom/*.dtb "$OUTDIR/" || true
-      make O=out modules_install INSTALL_MOD_PATH="$OUTDIR/modules" || true
-     fi
+      - name: Clone NetHunter kernel builder (Kali)
+        run: |
+          set -e
+          git clone --depth 1 --branch 2026.2 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder.git kali-nethunter-kernel-builder
+          ls -la kali-nethunter-kernel-builder || true
 
-  - name: List artifacts
-    run: |
-      ls -la out-artifacts || true
+      - name: Run NetHunter builder (driven via expect)
+        env:
+          KERNEL_SRC: ${{ github.workspace }}
+          DEFCONFIG: ${{ env.DEFCONFIG }}
+          TERM: xterm
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -ex
+          KD=./kali-nethunter-kernel-builder
+          OUTDIR=${GITHUB_WORKSPACE}/out-artifacts
+          mkdir -p "$OUTDIR"
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CC=clang
+          export LLVM=1
 
-  - name: Upload artifacts
-    uses: actions/upload-artifact@v4
-    with:
-      name: kernel-artifacts
-      path: out-artifacts/**
-      if-no-files-found: error
+          drive_builder_script() {
+            SCRIPT="$1"
+            cat > drive.expect <<EOF
+            set timeout -1
+            spawn bash "$SCRIPT" "$KERNEL_SRC" "$OUTDIR"
+            expect {
+            -re "Please select" { send "S\r"; exp_continue }
+            -re "Please select a valid options" { send "S\r"; exp_continue }
+            -re "Select an option" { send "S\r"; exp_continue }
+            -re "Full builds" { send "N\r"; exp_continue }
+            eof { }
+            }
+           EOF
+            expect drive.expect || true
+          }
+
+          if [ -f "$KD/build.sh" ]; then
+            drive_builder_script "$KD/build.sh"
+          elif [ -f "$KD/build-kernel.sh" ]; then
+            drive_builder_script "$KD/build-kernel.sh"
+          elif [ -f "$KD/kali-nethunter-kernel-builder.sh" ]; then
+            drive_builder_script "$KD/kali-nethunter-kernel-builder.sh"
+          else
+            make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- "${DEFCONFIG}"
+            make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
+            mkdir -p "$OUTDIR"
+            cp -v out/arch/arm64/boot/Image* "$OUTDIR/" || true
+            cp -v out/arch/arm64/boot/dts/*/*.dtb "$OUTDIR/" || true
+            cp -v out/arch/arm64/boot/dts/qcom/*.dtb "$OUTDIR/" || true
+            make O=out modules_install INSTALL_MOD_PATH="$OUTDIR/modules" || true
+          fi
+
+      - name: List artifacts
+        run: |
+          ls -la out-artifacts || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-artifacts
+          path: out-artifacts/**
+          if-no-files-found: error
