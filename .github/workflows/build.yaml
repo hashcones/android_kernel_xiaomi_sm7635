@@ -46,32 +46,35 @@ jobs:
 
   - name: Run NetHunter builder (if available)
     env:
-      KERNEL_SRC: ${{ github.workspace }}
-      DEFCONFIG: ${{ env.DEFCONFIG }}
+     KERNEL_SRC: ${{ github.workspace }}
+     DEFCONFIG: ${{ env.DEFCONFIG }}
+     TERM: xterm
+     DEBIAN_FRONTEND: noninteractive
     run: |
-      set -ex
-      KD=./kali-nethunter-kernel-builder
-      OUTDIR=${GITHUB_WORKSPACE}/out-artifacts
+     set -ex
+     export TERM=${TERM:-xterm}
+     KD=./kali-nethunter-kernel-builder
+     OUTDIR=${GITHUB_WORKSPACE}/out-artifacts
+     mkdir -p "$OUTDIR"
+     export ARCH=arm64
+     export CROSS_COMPILE=aarch64-linux-gnu-
+     export CC=clang
+     export LLVM=1
+     if [ -f "$KD/build.sh" ]; then
+       bash "$KD/build.sh" "$KERNEL_SRC" "$OUTDIR"
+     elif [ -f "$KD/build-kernel.sh" ]; then
+       bash "$KD/build-kernel.sh" "$KERNEL_SRC" "$OUTDIR"
+     elif [ -f "$KD/kali-nethunter-kernel-builder.sh" ]; then
+      bash "$KD/kali-nethunter-kernel-builder.sh" "$KERNEL_SRC" "$OUTDIR"
+     else
+      make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- "${DEFCONFIG}"
+      make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
       mkdir -p "$OUTDIR"
-      export ARCH=arm64
-      export CROSS_COMPILE=aarch64-linux-gnu-
-      export CC=clang
-      export LLVM=1
-      if [ -f "$KD/build.sh" ]; then
-        bash "$KD/build.sh" "$KERNEL_SRC" "$OUTDIR"
-      elif [ -f "$KD/build-kernel.sh" ]; then
-        bash "$KD/build-kernel.sh" "$KERNEL_SRC" "$OUTDIR"
-      elif [ -f "$KD/kali-nethunter-kernel-builder.sh" ]; then
-        bash "$KD/kali-nethunter-kernel-builder.sh" "$KERNEL_SRC" "$OUTDIR"
-      else
-        make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- "${DEFCONFIG}"
-        make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
-        mkdir -p "$OUTDIR"
-        cp -v out/arch/arm64/boot/Image* "$OUTDIR/" || true
-        cp -v out/arch/arm64/boot/dts/*/*.dtb "$OUTDIR/" || true
-        cp -v out/arch/arm64/boot/dts/qcom/*.dtb "$OUTDIR/" || true
-        make O=out modules_install INSTALL_MOD_PATH="$OUTDIR/modules" || true
-      fi
+      cp -v out/arch/arm64/boot/Image* "$OUTDIR/" || true
+      cp -v out/arch/arm64/boot/dts/*/*.dtb "$OUTDIR/" || true
+      cp -v out/arch/arm64/boot/dts/qcom/*.dtb "$OUTDIR/" || true
+      make O=out modules_install INSTALL_MOD_PATH="$OUTDIR/modules" || true
+     fi
 
   - name: List artifacts
     run: |
