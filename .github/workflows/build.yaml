@@ -1,5 +1,4 @@
-jobs:
- - name: build kernel
+
    steps:
    - name: Checkout kernel source
      uses: actions/checkout@v4
