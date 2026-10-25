@@ -18,4 +18,10 @@ jobs:
         run: git clone --depth 1 --branch 2026.2 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder.git
 
       - name: List files to verify clone
-        run: ls -l your-nethunter-builder
+        run: ls -l kali-nethunter-kernel-builder
+
+      - name: Upload cloned repo as artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: nethunter-kernel-builder
+          path: kali-nethunter-kernel-builder
