@@ -15,7 +15,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Clone GitLab repository
-        run: git clone https://gitlab.com/yourusername/your-nethunter-builder.git
+        run: git clone --depth 1 --branch 2026.2 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder.git
 
       - name: List files to verify clone
         run: ls -l your-nethunter-builder
