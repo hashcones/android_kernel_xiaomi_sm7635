@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout this repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Clone GitLab repository
         run: git clone --depth 1 --branch 2026.2 https://gitlab.com/kalilinux/nethunter/build-scripts/kali-nethunter-kernel-builder.git
@@ -21,7 +21,7 @@ jobs:
         run: ls -l kali-nethunter-kernel-builder
 
       - name: Upload cloned repo as artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: nethunter-kernel-builder
           path: kali-nethunter-kernel-builder
